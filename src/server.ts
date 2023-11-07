@@ -1,7 +1,9 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import { PassThrough } from 'stream';
+import { PassThrough, Readable } from 'stream';
+
+import CircularBuffer from './CircularBuffer';
 
 const app = express();
 const port = process.env.PORT || 8000;
@@ -9,9 +11,12 @@ const musicDir = path.join(__dirname, 'music');
 const clients = new Set<PassThrough>();
 
 let isMasterPlaying = false;
-let musicStream: PassThrough | null = null;
 const playSpecialTrackAfter = 15;
 const specialTrack = 'verginia.mp3';
+
+
+const bufferStream = new CircularBuffer(30 * 1024 * 1024); // Por exemplo, buffer para 30 MB
+let musicStream = new PassThrough();
 
 // Remove uma das definições duplicadas do endpoint '/master'
 
@@ -29,19 +34,6 @@ async function* streamFile(filePath: string) {
   }
   await new Promise((resolve) => setTimeout(resolve, 1000)); // Intervalo entre músicas
 }
-app.get('/master', async (req, res) => {
-  if (!musicStream) {
-    // Iniciar o stream mestre se ele ainda não foi iniciado
-    musicStream = new PassThrough();
-    
-    // Iniciar a transmissão de música
-    setupMusicStream(musicStream);
-
-    res.send('Master stream started.');
-  } else {
-    res.send('Master stream is already playing.');
-  }
-});
 
 async function* generateMusicStream() {
   let playCount = 0;
@@ -63,33 +55,6 @@ async function* generateMusicStream() {
     }
   }
 }
-app.get('/radio', (req, res) => {
-  // Define cabeçalhos para prevenir caching
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
-  
-  if (!musicStream) {
-    return res.status(503).send('The master stream has not been started yet.');
-  }
-
-  res.setHeader('Content-Type', 'audio/mpeg');
-  const clientStream = new PassThrough();
-
-  clients.add(clientStream);
-  musicStream.pipe(clientStream); // Pipe musicStream para o novo clientStream
-  clientStream.pipe(res); // Envie os dados do clientStream para a resposta HTTP
-
-  req.on('close', () => {
-    // Verifica se musicStream e clientStream são válidos antes de chamar unpipe
-    if (musicStream && clientStream.writable) {
-      musicStream.unpipe(clientStream);
-    }
-    clientStream.end(); // Fechar o clientStream para liberar recursos
-    clients.delete(clientStream);
-    console.log(`Client disconnected. Total listeners: ${clients.size}`);
-  });
-});
 
 
 async function setupMusicStream(stream: PassThrough) {
@@ -99,6 +64,7 @@ async function setupMusicStream(stream: PassThrough) {
 }
 
 function broadcastToClients(chunk: Buffer) {
+  bufferStream.write(chunk); // Escreve no buffer circular
   for (const client of clients) {
     if (!client.writableEnded) {
       client.write(chunk);
@@ -106,7 +72,54 @@ function broadcastToClients(chunk: Buffer) {
   }
 }
 
-// ... (mantenha o restante das funções como estão)
+app.get('/master', async (req, res) => {
+  if (!musicStream) {
+    // Iniciar o stream mestre se ele ainda não foi iniciado
+    musicStream = new PassThrough();
+    
+    // Iniciar a transmissão de música
+    setupMusicStream(musicStream);
+
+    res.send('Master stream started.');
+  } else {
+    res.send('Master stream is already playing.');
+  }
+});
+
+app.get('/radio', (req, res) => {
+  if (!musicStream) {
+    return res.status(503).send('The master stream has not been started yet.');
+  }
+
+  // Define cabeçalhos para prevenir caching
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Content-Type', 'audio/mpeg');
+
+  // Enviar o conteúdo atual do buffer para sincronizar com a transmissão ao vivo
+  const currentBufferContent = bufferStream.readCurrentContent();
+  res.write(currentBufferContent);
+
+  // Criar um novo PassThrough stream para este cliente
+  const clientStream = new PassThrough();
+  clients.add(clientStream);
+
+  // Conectar o cliente ao fluxo de música existente
+  musicStream.pipe(clientStream);
+  clientStream.pipe(res);
+
+  // Tratar o fechamento da conexão
+  req.on('close', () => {
+    if (musicStream && clientStream.writable) {
+      musicStream.unpipe(clientStream);
+    }
+    clientStream.end();
+    clients.delete(clientStream);
+    console.log(`Client disconnected. Total listeners: ${clients.size}`);
+  });
+});
+setupMusicStream(musicStream);
 
 // Inicialização do servidor
 app.listen(port, () => {
