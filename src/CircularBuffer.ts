@@ -20,6 +20,33 @@ export default class CircularBuffer {
       }
     });
   }
+  public readLiveContent(): Buffer {
+    // If the buffer isn't full and nothing was written yet, return an empty buffer
+    if (!this.isBufferFull && this.writePosition === this.readPosition) {
+      return Buffer.alloc(0);
+    }
+  
+    let contentSize;
+    if (this.isBufferFull) {
+      contentSize = this.size; // If buffer is full, we want to read the whole buffer
+    } else {
+      // Calculate the size of the content from the read position to the write position
+      contentSize = this.writePosition >= this.readPosition
+        ? this.writePosition - this.readPosition
+        : this.size - this.readPosition + this.writePosition;
+    }
+  
+    const liveContent = Buffer.alloc(contentSize);
+    let cur = this.readPosition;
+    for (let i = 0; i < liveContent.length; i++) {
+      liveContent[i] = this.buffer[cur];
+      cur = (cur + 1) % this.size; // Move to the next byte in the buffer
+    }
+  
+    // We do not update the readPosition here because it represents the "live" point
+  
+    return liveContent;
+  }
 
   public readCurrentContent(): Buffer {
     if (!this.isBufferFull && this.writePosition === this.readPosition) {

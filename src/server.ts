@@ -1,7 +1,7 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import { PassThrough, Readable } from 'stream';
+import { PassThrough } from 'stream';
 
 import CircularBuffer from './CircularBuffer';
 
@@ -9,16 +9,10 @@ const app = express();
 const port = process.env.PORT || 8000;
 const musicDir = path.join(__dirname, 'music');
 const clients = new Set<PassThrough>();
-
-let isMasterPlaying = false;
-const playSpecialTrackAfter = 15;
-const specialTrack = 'verginia.mp3';
-
+const MUSIC_INTERVAL = 1000; 
 
 const bufferStream = new CircularBuffer(30 * 1024 * 1024); // Por exemplo, buffer para 30 MB
 let musicStream = new PassThrough();
-
-// Remove uma das definições duplicadas do endpoint '/master'
 
 function shuffleArray(array: any[]): any[] {
   for (let i = array.length - 1; i > 0; i--) {
@@ -27,17 +21,21 @@ function shuffleArray(array: any[]): any[] {
   }
   return array;
 }
+
 async function* streamFile(filePath: string) {
-  const fileStream = fs.createReadStream(filePath);
-  for await (const chunk of fileStream) {
-    yield chunk;
+  try {
+    const fileStream = fs.createReadStream(filePath);
+    for await (const chunk of fileStream) {
+      yield chunk;
+    }
+    await new Promise((resolve) => setTimeout(resolve, MUSIC_INTERVAL));
+  } catch (error) {
+    console.error(`Error streaming file ${filePath}: ${error}`);
+    // Handle error appropriately
   }
-  await new Promise((resolve) => setTimeout(resolve, 1000)); // Intervalo entre músicas
 }
 
 async function* generateMusicStream() {
-  let playCount = 0;
-
   while (true) {
     let files = fs
       .readdirSync(musicDir)
@@ -45,26 +43,24 @@ async function* generateMusicStream() {
     shuffleArray(files);
 
     for (const file of files) {
-      if (playCount === playSpecialTrackAfter) {
-        yield* streamFile(path.join(musicDir, specialTrack));
-        playCount = 0; // Resetar o contador após a música especial
-      } else {
-        yield* streamFile(path.join(musicDir, file));
-        playCount++;
-      }
+      yield* streamFile(path.join(musicDir, file));
     }
   }
 }
 
-
 async function setupMusicStream(stream: PassThrough) {
   for await (const chunk of generateMusicStream()) {
-    stream.write(chunk);
+    broadcastToClients(chunk); // Alteração aqui
+    // Manter o loop ativo mesmo sem clientes
+    if (clients.size === 0) {
+      stream.write(chunk);
+    }
   }
 }
 
 function broadcastToClients(chunk: Buffer) {
-  bufferStream.write(chunk); // Escreve no buffer circular
+  bufferStream.write(chunk); // Correção aqui
+
   for (const client of clients) {
     if (!client.writableEnded) {
       client.write(chunk);
@@ -86,17 +82,16 @@ app.get('/master', async (req, res) => {
   }
 });
 
-app.get('/radio', (req, res) => {
-  if (!musicStream) {
-    return res.status(503).send('The master stream has not been started yet.');
-  }
-
-  // Define cabeçalhos para prevenir caching
+app.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
-  res.setHeader('Content-Type', 'audio/mpeg');
+  // Add any other headers common to all routes
+  next();
+});
 
+app.get('/radio', (req, res) => {
+  res.setHeader('Content-Type', 'audio/mpeg');
   // Enviar o conteúdo atual do buffer para sincronizar com a transmissão ao vivo
   const currentBufferContent = bufferStream.readCurrentContent();
   res.write(currentBufferContent);
@@ -105,15 +100,15 @@ app.get('/radio', (req, res) => {
   const clientStream = new PassThrough();
   clients.add(clientStream);
 
-  // Conectar o cliente ao fluxo de música existente
-  musicStream.pipe(clientStream);
+  // Correção: use clientStream.pipe(res) diretamente
   clientStream.pipe(res);
+  
+
+  // Transmite a música atual para o novo cliente
+  broadcastToClients(currentBufferContent);
 
   // Tratar o fechamento da conexão
   req.on('close', () => {
-    if (musicStream && clientStream.writable) {
-      musicStream.unpipe(clientStream);
-    }
     clientStream.end();
     clients.delete(clientStream);
     console.log(`Client disconnected. Total listeners: ${clients.size}`);
@@ -125,3 +120,5 @@ setupMusicStream(musicStream);
 app.listen(port, () => {
   console.log(`Servidor de rádio online ouvindo na porta ${port}`);
 });
+
+// Inicie a transmissão principal imediatamente
