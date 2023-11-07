@@ -33,6 +33,8 @@ app.get('/master', async (req, res) => {
   if (!musicStream) {
     // Iniciar o stream mestre se ele ainda não foi iniciado
     musicStream = new PassThrough();
+    
+    // Iniciar a transmissão de música
     setupMusicStream(musicStream);
 
     res.send('Master stream started.');
